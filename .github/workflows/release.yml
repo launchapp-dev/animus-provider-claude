@@ -1,0 +1,45 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build --release --target ${{ matrix.target }}
+      - name: package
+        run: |
+          mkdir -p dist
+          BIN=animus-provider-claude
+          ARCHIVE="${BIN}-${{ matrix.target }}.tar.gz"
+          tar -C target/${{ matrix.target }}/release -czf "dist/${ARCHIVE}" "${BIN}"
+          ( cd dist && shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256" )
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

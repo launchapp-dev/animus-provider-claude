@@ -1,0 +1,13 @@
+schema = "animus.plugin.v1"
+name = "animus-provider-claude"
+version = "0.1.0"
+plugin_kind = "provider"
+description = "Claude Code CLI provider plugin"
+
+[capabilities]
+streaming = true
+progress = true
+cancellation = true
+
+[binary]
+default = "animus-provider-claude"
