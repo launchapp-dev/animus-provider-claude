@@ -6,8 +6,8 @@ use std::time::Instant;
 
 use animus_plugin_protocol::{HealthCheckResult, HealthStatus};
 use animus_provider_protocol::{
-    AgentResumeRequest, AgentRunRequest, AgentRunResponse, BackendError, ProviderBackend,
-    ProviderCapabilities, ProviderManifest, TokenUsage,
+    AgentNotification, AgentResumeRequest, AgentRunRequest, AgentRunResponse, BackendError,
+    NotificationSink, ProviderBackend, ProviderCapabilities, ProviderManifest, TokenUsage,
 };
 use animus_session_backend::{
     cli::lookup_binary_in_path, ClaudeSessionBackend, SessionBackend, SessionEvent, SessionRequest,
@@ -80,6 +80,15 @@ impl<S: SessionBackend + 'static> ProviderBackend for ClaudeProviderBackend<S> {
     }
 
     async fn run_agent(&self, request: AgentRunRequest) -> Result<AgentRunResponse, BackendError> {
+        self.run_agent_streaming(request, NotificationSink::noop())
+            .await
+    }
+
+    async fn run_agent_streaming(
+        &self,
+        request: AgentRunRequest,
+        sink: NotificationSink,
+    ) -> Result<AgentRunResponse, BackendError> {
         let started = Instant::now();
         let session_request = translate_to_session_request(&request, &self.config);
         let run = self
@@ -87,12 +96,21 @@ impl<S: SessionBackend + 'static> ProviderBackend for ClaudeProviderBackend<S> {
             .start_session(session_request)
             .await
             .map_err(|e| BackendError::SessionStartFailed(format!("claude session: {e}")))?;
-        Ok(drain_session_run(run, started, request.model.as_deref(), &self.config).await)
+        Ok(drain_session_run(run, started, request.model.as_deref(), &self.config, &sink).await)
     }
 
     async fn resume_agent(
         &self,
         request: AgentResumeRequest,
+    ) -> Result<AgentRunResponse, BackendError> {
+        self.resume_agent_streaming(request, NotificationSink::noop())
+            .await
+    }
+
+    async fn resume_agent_streaming(
+        &self,
+        request: AgentResumeRequest,
+        sink: NotificationSink,
     ) -> Result<AgentRunResponse, BackendError> {
         let started = Instant::now();
         let session_id = request
@@ -105,7 +123,7 @@ impl<S: SessionBackend + 'static> ProviderBackend for ClaudeProviderBackend<S> {
             .resume_session(session_request, &session_id)
             .await
             .map_err(|e| BackendError::SessionStartFailed(format!("claude resume: {e}")))?;
-        Ok(drain_session_run(run, started, request.model.as_deref(), &self.config).await)
+        Ok(drain_session_run(run, started, request.model.as_deref(), &self.config, &sink).await)
     }
 
     async fn cancel_agent(&self, session_id: &str) -> Result<(), BackendError> {
@@ -199,17 +217,16 @@ fn mcp_endpoint_from_servers(mcp_servers: Option<&Value>) -> Option<String> {
     None
 }
 
-/// Drain the session event channel into the aggregated `AgentRunResponse`.
-///
-/// For v0.1.0 this is fully synchronous (we wait for `Finished` before
-/// returning). A future iteration can wire `SessionEvent::TextDelta` events
-/// through to JSON-RPC `agent/output` notifications via the plugin-runtime
-/// emitter once that surface is stable.
+/// Drain the session event channel into the aggregated `AgentRunResponse`,
+/// emitting one `AgentNotification` per per-event piece through `sink` as it
+/// arrives. The sink is `NotificationSink::noop()` when callers want pure
+/// aggregation (back-compat path on `run_agent`).
 async fn drain_session_run(
     mut run: SessionRun,
     started: Instant,
     requested_model: Option<&str>,
     config: &ClaudeConfig,
+    sink: &NotificationSink,
 ) -> AgentRunResponse {
     let backend_label = format!("claude:{}", run.selected_backend);
     let mut session_id = run.session_id.clone();
@@ -236,8 +253,18 @@ async fn drain_session_run(
             }
             SessionEvent::TextDelta { text } => {
                 output_text.push_str(&text);
+                sink.emit(AgentNotification::Output {
+                    session_id: session_id.clone().unwrap_or_default(),
+                    text,
+                    is_final: false,
+                });
             }
             SessionEvent::FinalText { text } => {
+                sink.emit(AgentNotification::Output {
+                    session_id: session_id.clone().unwrap_or_default(),
+                    text: text.clone(),
+                    is_final: true,
+                });
                 final_text = Some(text);
             }
             SessionEvent::ToolCall {
@@ -245,6 +272,12 @@ async fn drain_session_run(
                 arguments,
                 server,
             } => {
+                sink.emit(AgentNotification::ToolCall {
+                    session_id: session_id.clone().unwrap_or_default(),
+                    name: tool_name.clone(),
+                    arguments: arguments.clone(),
+                    server: server.clone(),
+                });
                 tool_calls.push(json!({
                     "tool": tool_name,
                     "arguments": arguments,
@@ -256,13 +289,25 @@ async fn drain_session_run(
                 output,
                 success,
             } => {
+                sink.emit(AgentNotification::ToolResult {
+                    session_id: session_id.clone().unwrap_or_default(),
+                    name: tool_name.clone(),
+                    output: output.clone(),
+                    success,
+                });
                 tool_results.push(json!({
                     "tool": tool_name,
                     "output": output,
                     "success": success,
                 }));
             }
-            SessionEvent::Thinking { text } => thinking.push(text),
+            SessionEvent::Thinking { text } => {
+                sink.emit(AgentNotification::Thinking {
+                    session_id: session_id.clone().unwrap_or_default(),
+                    text: text.clone(),
+                });
+                thinking.push(text);
+            }
             SessionEvent::Artifact {
                 artifact_id,
                 metadata: meta,
@@ -283,7 +328,12 @@ async fn drain_session_run(
                 message,
                 recoverable,
             } => {
-                errors.push(message.clone());
+                sink.emit(AgentNotification::Error {
+                    session_id: session_id.clone().unwrap_or_default(),
+                    message: message.clone(),
+                    recoverable,
+                });
+                errors.push(message);
                 if !recoverable {
                     exit_code = 1;
                 }

@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use animus_plugin_protocol::HealthStatus;
 use animus_provider_claude::backend::ClaudeProviderBackend;
 use animus_provider_claude::config::ClaudeConfig;
-use animus_provider_protocol::{AgentRunRequest, ProviderBackend};
+use animus_provider_protocol::{
+    AgentNotification, AgentRunRequest, NotificationSink, ProviderBackend,
+};
 use animus_session_backend::{
     Error as SessionError, Result as SessionResult, SessionBackend, SessionBackendInfo,
     SessionBackendKind, SessionCapabilities, SessionEvent, SessionRequest, SessionRun,
@@ -371,6 +373,192 @@ async fn health_unhealthy_when_binary_missing() {
     let health = backend.health().await.expect("health does not error");
     assert_eq!(health.status, HealthStatus::Unhealthy);
     assert!(health.last_error.is_some());
+}
+
+#[tokio::test]
+async fn run_agent_streaming_emits_notifications_in_event_order() {
+    let script = FakeScript {
+        session_id: Some("sess-stream".to_string()),
+        selected_backend: "fake-claude".to_string(),
+        events: vec![
+            SessionEvent::Started {
+                backend: "fake-claude".to_string(),
+                session_id: Some("sess-stream".to_string()),
+                pid: Some(7777),
+            },
+            SessionEvent::TextDelta {
+                text: "hi ".to_string(),
+            },
+            SessionEvent::Thinking {
+                text: "pondering".to_string(),
+            },
+            SessionEvent::TextDelta {
+                text: "there".to_string(),
+            },
+            SessionEvent::ToolCall {
+                tool_name: "Read".to_string(),
+                arguments: json!({"path": "/tmp/x"}),
+                server: Some("local".to_string()),
+            },
+            SessionEvent::ToolResult {
+                tool_name: "Read".to_string(),
+                output: json!({"bytes": 42}),
+                success: true,
+            },
+            SessionEvent::Error {
+                message: "transient blip".to_string(),
+                recoverable: true,
+            },
+            SessionEvent::FinalText {
+                text: "hi there".to_string(),
+            },
+            SessionEvent::Finished { exit_code: Some(0) },
+        ],
+    };
+    let backend =
+        ClaudeProviderBackend::with_session(FakeSession::new(script), ClaudeConfig::default());
+
+    let recorder: Arc<Mutex<Vec<AgentNotification>>> = Arc::new(Mutex::new(Vec::new()));
+    let r2 = Arc::clone(&recorder);
+    let sink = NotificationSink::new(move |n| r2.lock().unwrap().push(n));
+
+    let response = backend
+        .run_agent_streaming(
+            make_request(Some("claude-sonnet-4-6"), "stream please"),
+            sink,
+        )
+        .await
+        .expect("streaming run succeeds");
+
+    assert_eq!(response.session_id, "sess-stream");
+    assert_eq!(response.output, "hi there");
+    assert_eq!(response.exit_code, 0);
+
+    let notifications = recorder.lock().unwrap().clone();
+    assert_eq!(
+        notifications.len(),
+        7,
+        "expected 2 deltas + 1 thinking + 1 tool call + 1 tool result + 1 error + 1 final = 7, got {notifications:?}"
+    );
+
+    match &notifications[0] {
+        AgentNotification::Output {
+            session_id,
+            text,
+            is_final,
+        } => {
+            assert_eq!(session_id, "sess-stream");
+            assert_eq!(text, "hi ");
+            assert!(!is_final);
+        }
+        other => panic!("expected Output, got {other:?}"),
+    }
+    match &notifications[1] {
+        AgentNotification::Thinking { session_id, text } => {
+            assert_eq!(session_id, "sess-stream");
+            assert_eq!(text, "pondering");
+        }
+        other => panic!("expected Thinking, got {other:?}"),
+    }
+    match &notifications[2] {
+        AgentNotification::Output { text, is_final, .. } => {
+            assert_eq!(text, "there");
+            assert!(!is_final);
+        }
+        other => panic!("expected Output, got {other:?}"),
+    }
+    match &notifications[3] {
+        AgentNotification::ToolCall {
+            name,
+            arguments,
+            server,
+            ..
+        } => {
+            assert_eq!(name, "Read");
+            assert_eq!(arguments, &json!({"path": "/tmp/x"}));
+            assert_eq!(server.as_deref(), Some("local"));
+        }
+        other => panic!("expected ToolCall, got {other:?}"),
+    }
+    match &notifications[4] {
+        AgentNotification::ToolResult {
+            name,
+            output,
+            success,
+            ..
+        } => {
+            assert_eq!(name, "Read");
+            assert_eq!(output, &json!({"bytes": 42}));
+            assert!(*success);
+        }
+        other => panic!("expected ToolResult, got {other:?}"),
+    }
+    match &notifications[5] {
+        AgentNotification::Error {
+            message,
+            recoverable,
+            ..
+        } => {
+            assert_eq!(message, "transient blip");
+            assert!(*recoverable);
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+    match &notifications[6] {
+        AgentNotification::Output { text, is_final, .. } => {
+            assert_eq!(text, "hi there");
+            assert!(*is_final);
+        }
+        other => panic!("expected final Output, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn run_agent_noop_sink_path_matches_streaming_response() {
+    let make_script = || FakeScript {
+        session_id: Some("sess-eq".to_string()),
+        selected_backend: "fake-claude".to_string(),
+        events: vec![
+            SessionEvent::Started {
+                backend: "fake-claude".to_string(),
+                session_id: Some("sess-eq".to_string()),
+                pid: None,
+            },
+            SessionEvent::TextDelta {
+                text: "abc".to_string(),
+            },
+            SessionEvent::FinalText {
+                text: "abc!".to_string(),
+            },
+            SessionEvent::Finished { exit_code: Some(0) },
+        ],
+    };
+
+    let bulk_backend = ClaudeProviderBackend::with_session(
+        FakeSession::new(make_script()),
+        ClaudeConfig::default(),
+    );
+    let bulk = bulk_backend
+        .run_agent(make_request(None, "x"))
+        .await
+        .expect("bulk run");
+
+    let stream_backend = ClaudeProviderBackend::with_session(
+        FakeSession::new(make_script()),
+        ClaudeConfig::default(),
+    );
+    let stream = stream_backend
+        .run_agent_streaming(make_request(None, "x"), NotificationSink::noop())
+        .await
+        .expect("stream run");
+
+    assert_eq!(bulk.session_id, stream.session_id);
+    assert_eq!(bulk.output, stream.output);
+    assert_eq!(bulk.exit_code, stream.exit_code);
+    assert_eq!(bulk.tool_calls, stream.tool_calls);
+    assert_eq!(bulk.tool_results, stream.tool_results);
+    assert_eq!(bulk.thinking, stream.thinking);
+    assert_eq!(bulk.errors, stream.errors);
 }
 
 #[tokio::test]
