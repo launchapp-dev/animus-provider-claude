@@ -1,5 +1,5 @@
 use animus_plugin_protocol::{PluginInfo, PLUGIN_KIND_PROVIDER};
-use animus_plugin_runtime::provider_main;
+use animus_plugin_runtime::provider_main_with_capabilities;
 use animus_provider_claude::backend::ClaudeProviderBackend;
 use animus_provider_claude::config::ClaudeConfig;
 
@@ -20,5 +20,10 @@ async fn main() -> anyhow::Result<()> {
         description: Some(env!("CARGO_PKG_DESCRIPTION").into()),
     };
 
-    provider_main(info, backend).await
+    // claude supports mid-flight cancel: backend.cancel_agent terminates
+    // the underlying `claude` CLI subprocess via the session manager.
+    // Opt in to the testkit's concurrent-cancel conformance scenario.
+    let extra_capabilities = vec!["$harness/cancellation-loop-v2".to_string()];
+
+    provider_main_with_capabilities(info, backend, extra_capabilities).await
 }

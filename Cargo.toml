@@ -1,6 +1,6 @@
 [package]
 name = "animus-provider-claude"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 license = "MIT"
 description = "Claude Code CLI provider plugin for Animus"
@@ -18,10 +18,10 @@ name = "animus-provider-claude"
 path = "src/main.rs"
 
 [dependencies]
-animus-plugin-protocol   = { git = "https://github.com/launchapp-dev/animus-protocol", tag = "v0.1.8" }
-animus-provider-protocol = { git = "https://github.com/launchapp-dev/animus-protocol", tag = "v0.1.8" }
-animus-plugin-runtime    = { git = "https://github.com/launchapp-dev/animus-protocol", tag = "v0.1.8" }
-animus-session-backend   = { git = "https://github.com/launchapp-dev/animus-protocol", tag = "v0.1.8" }
+animus-plugin-protocol   = { git = "https://github.com/launchapp-dev/animus-protocol", tag = "v0.1.13" }
+animus-provider-protocol = { git = "https://github.com/launchapp-dev/animus-protocol", tag = "v0.1.13" }
+animus-plugin-runtime    = { git = "https://github.com/launchapp-dev/animus-protocol", tag = "v0.1.13" }
+animus-session-backend   = { git = "https://github.com/launchapp-dev/animus-protocol", tag = "v0.1.13" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "process", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }
