@@ -36,7 +36,7 @@ struct FakeCalls {
 
 struct FakeSession {
     script: FakeScript,
-    calls: Mutex<FakeCalls>,
+    calls: Arc<Mutex<FakeCalls>>,
     capabilities: SessionCapabilities,
 }
 
@@ -44,7 +44,7 @@ impl FakeSession {
     fn new(script: FakeScript) -> Self {
         Self {
             script,
-            calls: Mutex::new(FakeCalls::default()),
+            calls: Arc::new(Mutex::new(FakeCalls::default())),
             capabilities: SessionCapabilities {
                 supports_resume: true,
                 supports_terminate: true,
@@ -580,4 +580,38 @@ async fn health_healthy_when_binary_present() {
     let health = backend.health().await.expect("health does not error");
     assert_eq!(health.status, HealthStatus::Healthy);
     assert!(health.last_error.is_none());
+}
+
+#[tokio::test]
+async fn run_agent_passes_mcp_servers_through_to_session_request() {
+    let script = FakeScript {
+        session_id: Some("sess-mcp".to_string()),
+        selected_backend: "fake-claude".to_string(),
+        events: vec![
+            SessionEvent::FinalText {
+                text: "done".to_string(),
+            },
+            SessionEvent::Finished { exit_code: Some(0) },
+        ],
+    };
+    let fake = FakeSession::new(script);
+    let calls = Arc::clone(&fake.calls);
+    let backend = ClaudeProviderBackend::with_session(fake, ClaudeConfig::default());
+
+    let servers = json!({
+        "docs": { "command": "npx", "args": ["-y", "docs-mcp"] },
+        "linear": { "type": "http", "url": "https://mcp.linear.app/mcp" }
+    });
+    let mut request = make_request(None, "go");
+    request.mcp_servers = Some(servers.clone());
+
+    backend
+        .run_agent(request)
+        .await
+        .expect("run_agent succeeds");
+
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.starts.len(), 1);
+    assert_eq!(calls.starts[0].mcp_servers, Some(servers));
+    assert_eq!(calls.starts[0].mcp_endpoint, None);
 }

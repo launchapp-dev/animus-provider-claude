@@ -164,8 +164,6 @@ fn translate_to_session_request(
         .clone()
         .unwrap_or_else(|| config.default_model.clone());
 
-    let mcp_endpoint = mcp_endpoint_from_servers(request.mcp_servers.as_ref());
-
     let env_vars: Vec<(String, String)> = request
         .env
         .iter()
@@ -195,26 +193,13 @@ fn translate_to_session_request(
         prompt: request.prompt.clone(),
         cwd: request.cwd.clone(),
         project_root: request.project_root.clone(),
-        mcp_endpoint,
+        mcp_endpoint: None,
+        mcp_servers: request.mcp_servers.clone(),
         permission_mode: request.permission_mode.clone(),
         timeout_secs: request.timeout_secs,
         env_vars,
         extras: Value::Object(extras_map),
     }
-}
-
-fn mcp_endpoint_from_servers(mcp_servers: Option<&Value>) -> Option<String> {
-    let value = mcp_servers?;
-    if let Some(s) = value.as_str() {
-        return Some(s.to_string());
-    }
-    if let Some(s) = value.get("endpoint").and_then(|v| v.as_str()) {
-        return Some(s.to_string());
-    }
-    if let Some(s) = value.get("url").and_then(|v| v.as_str()) {
-        return Some(s.to_string());
-    }
-    None
 }
 
 /// Drain the session event channel into the aggregated `AgentRunResponse`,
