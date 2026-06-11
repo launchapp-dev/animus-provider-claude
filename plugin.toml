@@ -1,6 +1,6 @@
 schema = "animus.plugin.v1"
 name = "animus-provider-claude"
-version = "0.2.6"
+version = "0.2.7"
 plugin_kind = "provider"
 description = "Claude Code CLI provider plugin"
 

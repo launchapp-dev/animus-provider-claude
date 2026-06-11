@@ -7,7 +7,8 @@ use std::time::Instant;
 use animus_plugin_protocol::{HealthCheckResult, HealthStatus};
 use animus_provider_protocol::{
     AgentNotification, AgentResumeRequest, AgentRunRequest, AgentRunResponse, BackendError,
-    NotificationSink, ProviderBackend, ProviderCapabilities, ProviderManifest, TokenUsage,
+    InteractionRequestPayload, NotificationSink, ProviderBackend, ProviderCapabilities,
+    ProviderManifest, TokenUsage,
 };
 use animus_session_backend::{
     cli::lookup_binary_in_path, ClaudeSessionBackend, SessionBackend, SessionEvent, SessionRequest,
@@ -308,6 +309,23 @@ async fn drain_session_run(
                     tokens = parse_token_usage(&meta);
                 }
                 metadata.push(meta);
+            }
+            SessionEvent::InteractionRequested { id, kind } => {
+                sink.emit(AgentNotification::InteractionRequested {
+                    session_id: session_id.clone().unwrap_or_default(),
+                    interaction_id: id.clone(),
+                    interaction_kind: kind.clone(),
+                    payload: InteractionRequestPayload::default(),
+                    expires_at: None,
+                });
+                metadata.push(json!({
+                    "interaction_requested": { "id": id, "kind": kind },
+                }));
+            }
+            SessionEvent::InteractionResolved { id, decision } => {
+                metadata.push(json!({
+                    "interaction_resolved": { "id": id, "decision": decision },
+                }));
             }
             SessionEvent::Error {
                 message,
